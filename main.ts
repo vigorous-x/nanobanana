@@ -6,7 +6,7 @@ import { Buffer } from "https://deno.land/std@0.177.0/node/buffer.ts";
 function createJsonErrorResponse(message: string, statusCode = 500) { /* ... */ }
 
 // --- 核心业务逻辑：调用 OpenRouter ---
-async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
+async function callOpenRouter(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
     if (!apiKey) {
         throw new Error("callGemini received an empty apiKey.");
     }
