@@ -28,9 +28,8 @@ async function callGemini(
   };
 
   console.log("Sending payload to Gemini API:", JSON.stringify(geminiPayload, null, 2));
-
   const apiResponse = await fetch(
-    `https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash-preview-image-generation:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
