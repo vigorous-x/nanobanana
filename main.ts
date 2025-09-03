@@ -10,7 +10,7 @@ async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'ima
     if (!apiKey) { throw new Error("callGemini received an empty apiKey."); }
     const geminiPayload = { contents: messages };
     console.log("Sending payload to Gemini API:", JSON.stringify(geminiPayload, null, 2));
-    const apiResponse = await fetch("https://generativelanguage.googleapis.com/v1beta/modelsgemini-2.5-flash-image-preview:generateContent", {
+    const apiResponse = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent", {
         method: "POST",
         headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
         body: JSON.stringify(geminiPayload)
@@ -134,31 +134,39 @@ serve(async (req) => {
     if (pathname === "/generate") {
         try {
             const { prompt, images, apikey } = await req.json();
-            const geminiApiKey = apikey; // 不再尝试读取 Deno.env
+            const geminiApiKey = apikey;
             if (!geminiApiKey) { return new Response(JSON.stringify({ error: "Gemini API key is not set." }), { status: 500 }); }
             if (!prompt || !images || !images.length) { return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400 }); }
-            
-            const webUiMessages = [ { role: "user", parts: [ { text: prompt }, ...images.map(img => ({ inlineData: { mimeType: img.split(';')[0].replace('data:', ''), data: img.split(',')[1] } })) ] } ];
-            
-            // --- 这里是修改的关键 ---
-            const result = await callGemini(webUiMessages, geminiApiKey);
-    
-            // 检查返回的是否是图片类型，并提取 content
-            if (result && result.type === 'image') {
-                // 返回给前端正确的 JSON 结构
-                return new Response(JSON.stringify({ imageUrl: result.content }), { 
-                    headers: { "Content-Type": "application/json" } 
-                });
-            } else {
-                // 如果模型意外地返回了文本或其他内容，则返回错误
-                const errorMessage = result ? `Model returned text instead of an image: ${result.content}` : "Model returned an empty response.";
-                console.error("Error handling /generate request:", errorMessage);
-                return new Response(JSON.stringify({ error: errorMessage }), { 
-                    status: 500, 
-                    headers: { "Content-Type": "application/json" } 
-                });
+
+            // 构造 contents 字段，兼容 Google 官方 SDK
+            const parts = [ { text: prompt }, ...images.map(img => ({ inlineData: { mimeType: img.split(';')[0].replace('data:', ''), data: img.split(',')[1] } })) ];
+            const contents = [{ role: "user", parts }];
+
+            // 直接用 fetch 调用 Gemini API
+            const geminiPayload = { contents };
+            const apiResponse = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent", {
+                method: "POST",
+                headers: { "x-goog-api-key": geminiApiKey, "Content-Type": "application/json" },
+                body: JSON.stringify(geminiPayload)
+            });
+            if (!apiResponse.ok) {
+                const errorBody = await apiResponse.text();
+                // 针对 429 错误友好提示
+                if (apiResponse.status === 429) {
+                    return new Response(JSON.stringify({ error: "Google Gemini API 免费额度已用尽或请求过快，请更换 API Key 或稍后再试。" }), { status: 429 });
+                }
+                return new Response(JSON.stringify({ error: `Gemini API error: ${errorBody}` }), { status: apiResponse.status });
             }
-            
+            const responseData = await apiResponse.json();
+            const candidate = responseData.candidates?.[0]?.content;
+            if (candidate?.parts?.[0]?.inlineData) {
+                const { mimeType, data } = candidate.parts[0].inlineData;
+                return new Response(JSON.stringify({ imageUrl: `data:${mimeType};base64,${data}` }), { headers: { "Content-Type": "application/json" } });
+            }
+            if (candidate?.parts?.[0]?.text) {
+                return new Response(JSON.stringify({ error: `Model returned text instead of an image: ${candidate.parts[0].text}` }), { status: 500, headers: { "Content-Type": "application/json" } });
+            }
+            return new Response(JSON.stringify({ error: "Model returned an empty response." }), { status: 500 });
         } catch (error) {
             console.error("Error handling /generate request:", error);
             return new Response(JSON.stringify({ error: error.message }), { status: 500 });
