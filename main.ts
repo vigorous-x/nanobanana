@@ -6,26 +6,65 @@ import { Buffer } from "https://deno.land/std@0.177.0/node/buffer.ts";
 function createJsonErrorResponse(message: string, statusCode = 500) { /* ... */ }
 
 // --- 核心业务逻辑：调用 OpenRouter ---
-async function callOpenRouter(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
-    if (!apiKey) { throw new Error("callOpenRouter received an empty apiKey."); }
-    const openrouterPayload = { model: "google/gemini-2.5-flash-image-preview:free", messages };
-    console.log("Sending SMARTLY EXTRACTED payload to OpenRouter:", JSON.stringify(openrouterPayload, null, 2));
-    const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify(openrouterPayload)
-    });
+async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
+    if (!apiKey) {
+        throw new Error("callGemini received an empty apiKey.");
+    }
+
+    // 转换消息格式以适应Gemini API要求
+    const geminiPayload = {
+        contents: messages.map(msg => ({
+            role: msg.role,
+            parts: msg.content ? [{ text: msg.content }] : []
+        }))
+    };
+
+    console.log("Sending payload to Gemini API:", JSON.stringify(geminiPayload, null, 2));
+
+    // 调用Gemini API
+    const apiResponse = await fetch(
+        `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(geminiPayload)
+        }
+    );
+
     if (!apiResponse.ok) {
         const errorBody = await apiResponse.text();
-        throw new Error(`OpenRouter API error: Unauthorized - ${errorBody}`);
+        throw new Error(`Gemini API error: ${apiResponse.statusText} - ${errorBody}`);
     }
+
     const responseData = await apiResponse.json();
-    console.log("OpenRouter Response:", JSON.stringify(responseData, null, 2));
-    const message = responseData.choices?.[0]?.message;
-    if (message?.images?.[0]?.image_url?.url) { return { type: 'image', content: message.images[0].image_url.url }; }
-    if (typeof message?.content === 'string' && message.content.startsWith('data:image/')) { return { type: 'image', content: message.content }; }
-    if (typeof message?.content === 'string' && message.content.trim() !== '') { return { type: 'text', content: message.content }; }
+    console.log("Gemini Response:", JSON.stringify(responseData, null, 2));
+
+    // 解析Gemini响应
+    const candidate = responseData.candidates?.[0];
+    const contentPart = candidate?.content?.parts?.[0];
+
+    // 检查是否为图像响应
+    if (contentPart?.inlineData?.mimeType?.startsWith('image/')) {
+        return {
+            type: 'image',
+            content: `data:${contentPart.inlineData.mimeType};base64,${contentPart.inlineData.data}`
+        };
+    }
+
+    // 检查是否为文本响应
+    if (typeof contentPart?.text === 'string' && contentPart.text.trim() !== '') {
+        return {
+            type: 'text',
+            content: contentPart.text
+        };
+    }
+
+    // 处理无有效内容的情况
     return { type: 'text', content: "[模型没有返回有效内容]" };
 }
+    
 
 // --- 主服务逻辑 ---
 serve(async (req) => {
