@@ -10,7 +10,7 @@ function createJsonErrorResponse(message: string, statusCode = 500) {
   });
 }
 
-// --- 核心业务逻辑：调用 Gemini API（使用正确模型） ---
+// --- 核心业务逻辑：调用 Gemini API ---
 async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
   if (!apiKey) {
     throw new Error("callGemini received an empty apiKey.");
@@ -20,6 +20,7 @@ async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'ima
   const geminiPayload = {
     contents: messages,
     generationConfig: {
+      // 仅保留Gemini支持的配置参数
       maxOutputTokens: 2048,
       temperature: 0.7
     }
@@ -27,9 +28,9 @@ async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'ima
 
   console.log("Sending payload to Gemini API:", JSON.stringify(geminiPayload, null, 2));
 
-  // 关键修正：使用官方支持的 gemini-1.5-flash 模型
+  // 调用Gemini API
   const apiResponse = await fetch(
-    `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -75,7 +76,7 @@ async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'ima
   return { type: 'text', content: "[模型没有返回有效内容]" };
 }
 
-// --- 主服务逻辑（与之前一致，无需修改） ---
+// --- 主服务逻辑 ---
 serve(async (req) => {
   const pathname = new URL(req.url).pathname;
   
