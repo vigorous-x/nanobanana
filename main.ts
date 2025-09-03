@@ -10,24 +10,25 @@ function createJsonErrorResponse(message: string, statusCode = 500) {
   });
 }
 
-// --- 核心业务逻辑：调用 Gemini API（修正函数名与功能匹配） ---
+// --- 核心业务逻辑：调用 Gemini API ---
 async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
   if (!apiKey) {
     throw new Error("callGemini received an empty apiKey.");
   }
 
-  // 关键修正：按 Gemini API 要求构造请求体
-  // messages 已是 { role: string; parts: Array<{ text?: string; inlineData?: {...} }> } 格式，无需额外转换
+  // 构造符合Gemini API要求的请求体
   const geminiPayload = {
-    contents: messages, // 直接使用正确格式的 messages，无需嵌套转换
+    contents: messages,
     generationConfig: {
-      responseMimeType: "application/json" // 确保响应格式可解析
+      // 仅保留Gemini支持的配置参数
+      maxOutputTokens: 2048,
+      temperature: 0.7
     }
   };
 
   console.log("Sending payload to Gemini API:", JSON.stringify(geminiPayload, null, 2));
 
-  // 调用 Gemini API（使用 2.5 Flash 图像预览模型）
+  // 调用Gemini API
   const apiResponse = await fetch(
     `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`,
     {
@@ -45,27 +46,26 @@ async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'ima
   const responseData = await apiResponse.json();
   console.log("Gemini Response:", JSON.stringify(responseData, null, 2));
 
-  // 解析 Gemini 响应（处理文本/图像输出）
+  // 解析Gemini响应
   const candidate = responseData.candidates?.[0];
   if (!candidate?.content?.parts?.length) {
     throw new Error("Gemini response has no valid parts");
   }
 
-  // 遍历 parts，优先处理图像，再处理文本
   let imageContent = "";
   let textContent = "";
   for (const part of candidate.content.parts) {
-    // 图像响应：Gemini 图像输出在 inlineData 中
+    // 处理图像响应
     if (part.inlineData?.mimeType?.startsWith('image/')) {
       imageContent = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
     }
-    // 文本响应：直接提取 text 字段
+    // 处理文本响应
     if (part.text && typeof part.text === 'string' && part.text.trim()) {
       textContent += part.text.trim() + "\n";
     }
   }
 
-  // 优先返回图像（若有），否则返回文本
+  // 优先返回图像，否则返回文本
   if (imageContent) {
     return { type: 'image', content: imageContent };
   }
@@ -96,7 +96,6 @@ serve(async (req) => {
   if (pathname.includes(":streamGenerateContent")) {
     try {
       const geminiRequest = await req.json();
-      // 提取 API Key（支持 Bearer Token 或 x-goog-api-key 头）
       let apiKey = req.headers.get("Authorization")?.replace("Bearer ", "") || req.headers.get("x-goog-api-key") || "";
       if (!apiKey) {
         return createJsonErrorResponse("API key is missing.", 401);
@@ -105,12 +104,11 @@ serve(async (req) => {
         return createJsonErrorResponse("Invalid request: 'contents' array is missing.", 400);
       }
 
-      // --- 智能提取逻辑（修正：保留 Gemini 原生 parts 格式） ---
+      // 提取相关历史消息
       const fullHistory = geminiRequest.contents;
       const lastUserMessageIndex = fullHistory.findLastIndex((msg: any) => msg.role === 'user');
       let relevantHistory = [];
       if (lastUserMessageIndex !== -1) {
-        // 提取最后一条用户消息前的最近一条模型消息到当前用户消息
         const lastModelMsgIndex = fullHistory.findLastIndex((msg: any, idx: number) => msg.role === 'model' && idx < lastUserMessageIndex);
         relevantHistory = fullHistory.slice(lastModelMsgIndex === -1 ? 0 : lastModelMsgIndex, lastUserMessageIndex + 1);
       }
@@ -118,24 +116,17 @@ serve(async (req) => {
         return createJsonErrorResponse("No user message found.", 400);
       }
 
-      // --- 关键修正：不转换为 OpenRouter 格式，直接使用 Gemini 原生格式 ---
-      // 仅修正 role 映射（Gemini 的 'model' 对应 API 要求的 'assistant'）
+      // 转换为Gemini要求的消息格式
       const geminiMessages = relevantHistory.map((msg: any) => ({
-        role: msg.role === 'model' ? 'assistant' : msg.role, // 角色映射
+        role: msg.role === 'model' ? 'assistant' : msg.role,
         parts: msg.parts.map((part: any) => {
-          // 处理图像输入：将 Gemini 请求的 inlineData 转为 API 要求格式
-          if (part.inlineData) {
-            return { inlineData: part.inlineData };
-          }
-          // 处理文本输入：直接返回 { text: ... }，不添加 type 字段
-          if (part.text && typeof part.text === 'string') {
-            return { text: part.text.trim() };
-          }
+          if (part.inlineData) return { inlineData: part.inlineData };
+          if (part.text) return { text: part.text.trim() };
           return part;
         })
       }));
 
-      // --- 流式处理逻辑 ---
+      // 流式处理
       const stream = new ReadableStream({
         async start(controller) {
           const encoder = new TextEncoder();
@@ -144,7 +135,7 @@ serve(async (req) => {
           try {
             const geminiResult = await callGemini(geminiMessages, apiKey);
 
-            // 流式返回文本（逐字符模拟流）
+            // 流式返回文本
             if (geminiResult.type === 'text') {
               const text = geminiResult.content;
               for (const char of text) {
@@ -154,11 +145,11 @@ serve(async (req) => {
                     finishReason: null
                   }]
                 });
-                await new Promise(r => setTimeout(r, 2)); // 模拟流延迟
+                await new Promise(r => setTimeout(r, 2));
               }
             }
 
-            // 返回图像（若有）
+            // 返回图像
             if (geminiResult.type === 'image') {
               const [mimeType, base64Data] = geminiResult.content.split(/data:(.+);base64,(.*)/).filter(Boolean);
               sendChunk({
@@ -178,7 +169,7 @@ serve(async (req) => {
                 content: { role: "model", parts: [] },
                 finishReason: "STOP"
               }],
-              usageMetadata: { promptTokenCount: 0, totalTokenCount: 0 } // 实际项目可从 Gemini 响应提取真实 Token 数
+              usageMetadata: { promptTokenCount: 0, totalTokenCount: 0 }
             });
             sendChunk({ done: true });
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -218,7 +209,7 @@ serve(async (req) => {
         return createJsonErrorResponse("Invalid request: 'contents' array is missing.", 400);
       }
 
-      // --- 智能提取逻辑（同流式，保留 Gemini 原生格式） ---
+      // 提取相关历史消息
       const fullHistory = geminiRequest.contents;
       const lastUserMessageIndex = fullHistory.findLastIndex((msg: any) => msg.role === 'user');
       let relevantHistory = [];
@@ -230,7 +221,7 @@ serve(async (req) => {
         return createJsonErrorResponse("No user message found.", 400);
       }
 
-      // --- 关键修正：使用 Gemini 原生格式构造消息 ---
+      // 转换为Gemini要求的消息格式
       const geminiMessages = relevantHistory.map((msg: any) => ({
         role: msg.role === 'model' ? 'assistant' : msg.role,
         parts: msg.parts.map((part: any) => {
@@ -240,10 +231,10 @@ serve(async (req) => {
         })
       }));
 
-      // 调用 Gemini API
+      // 调用Gemini API
       const geminiResult = await callGemini(geminiMessages, apiKey);
 
-      // 构造 Gemini 风格的响应
+      // 构造响应
       const finalParts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
       if (geminiResult.type === 'image') {
         const [mimeType, base64Data] = geminiResult.content.split(/data:(.+);base64,(.*)/).filter(Boolean);
@@ -263,7 +254,7 @@ serve(async (req) => {
           finishReason: "STOP",
           index: 0
         }],
-        usageMetadata: { promptTokenCount: 0, totalTokenCount: 0 } // 实际项目可替换为真实 Token 数
+        usageMetadata: { promptTokenCount: 0, totalTokenCount: 0 }
       };
 
       return new Response(JSON.stringify(responsePayload), {
@@ -275,11 +266,10 @@ serve(async (req) => {
     }
   }
 
-  // --- 路由 3: 你的 Web UI (nano banana) ---
+  // --- 路由 3: Web UI 生成接口 ---
   if (pathname === "/generate") {
     try {
       const { prompt, images, apikey } = await req.json();
-      // 提取 API Key（支持请求体传入或环境变量）
       const geminiApiKey = apikey || Deno.env.get("GEMINI_API_KEY");
       if (!geminiApiKey) {
         return new Response(JSON.stringify({ error: "Gemini API key is not set." }), {
@@ -294,26 +284,25 @@ serve(async (req) => {
         });
       }
 
-      // --- 关键修正：构造 Gemini 原生格式的消息 ---
+      // 构造Gemini消息格式
       const geminiMessages = [{
         role: "user",
         parts: [
-          { text: prompt.trim() }, // 文本部分：直接 { text: ... }
+          { text: prompt.trim() },
           ...images.map((img: string) => {
-            // 处理图像输入：从 dataURL 提取 mimeType 和 base64 数据
             const [mimeType, base64Data] = img.split(/data:(.+);base64,(.*)/).filter(Boolean);
             if (!mimeType || !base64Data) {
               throw new Error(`Invalid image format: ${img.slice(0, 50)}...`);
             }
-            return { inlineData: { mimeType, data: base64Data } }; // 图像部分：{ inlineData: ... }
+            return { inlineData: { mimeType, data: base64Data } };
           })
         ]
       }];
 
-      // 调用 Gemini API
+      // 调用Gemini API
       const result = await callGemini(geminiMessages, geminiApiKey);
 
-      // 返回 Web UI 所需格式
+      // 返回结果
       if (result.type === 'image') {
         return new Response(JSON.stringify({ imageUrl: result.content }), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
