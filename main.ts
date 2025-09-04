@@ -12,75 +12,99 @@ async function callOpenRouter(messages: any[], apiKey: string): Promise<{ type: 
         throw new Error("callOpenRouter received an empty apiKey."); 
     }
     
-    // 定义初始模型为免费版本
-    // 免费版模型: google/gemini-2.5-flash-image-preview:free
-    // 非免费版模型: google/gemini-2.5-flash-image-preview
-    let model = "google/gemini-2.5-flash-image-preview:free";
+    // 定义模型列表，优先使用免费模型
+    const MODELS = {
+        free: "google/gemini-2.5-flash-image-preview:free",
+        paid: "google/gemini-2.5-flash-image-preview"
+    };
     
     /**
      * 封装请求逻辑，便于在模型切换时复用
      * @param currentModel 当前要使用的模型名称
-     * @returns 包含响应对象和当前使用模型的结果
+     * @returns 包含响应对象、响应数据和当前使用模型的结果
      */
     const makeRequest = async (currentModel: string) => {
-        // 构建请求 payload，包含模型和消息列表
-        const openrouterPayload = { model: currentModel, messages };
-        console.log(`Sending payload to OpenRouter with model ${currentModel}:`, JSON.stringify(openrouterPayload, null, 2));
-        
-        // 发送POST请求到OpenRouter API
-        const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST", 
-            headers: { 
-                "Authorization": `Bearer ${apiKey}`,  // 身份验证头
-                "Content-Type": "application/json"     // 指定内容类型为JSON
-            },
-            body: JSON.stringify(openrouterPayload)   // 将payload转为JSON字符串
-        });
-        
-        return { apiResponse, currentModel };
+        try {
+            // 构建请求 payload，包含模型和消息列表
+            const openrouterPayload = { model: currentModel, messages };
+            console.log(`Sending payload to OpenRouter with model ${currentModel}:`, 
+                      JSON.stringify(openrouterPayload, null, 2));
+            
+            // 发送POST请求到OpenRouter API
+            const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                method: "POST", 
+                headers: { 
+                    "Authorization": `Bearer ${apiKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(openrouterPayload)
+            });
+
+            // 解析响应内容（无论成功与否都尝试解析）
+            let responseData;
+            try {
+                responseData = await apiResponse.json();
+            } catch (e) {
+                responseData = { error: await apiResponse.text() };
+            }
+
+            return { 
+                apiResponse, 
+                responseData, 
+                currentModel,
+                ok: apiResponse.ok
+            };
+        } catch (error) {
+            console.error(`Request failed with model ${currentModel}:`, error);
+            return { 
+                apiResponse: null, 
+                responseData: { error: error.message }, 
+                currentModel,
+                ok: false
+            };
+        }
     };
     
-    // 首次使用免费模型发送请求
-    let { apiResponse, currentModel } = await makeRequest(model);
+    // 先尝试免费模型
+    let result = await makeRequest(MODELS.free);
     
-    /**
-     * 检查API响应是否出错，若出错判断是否为免费额度用尽
-     * 如果是免费额度用尽，自动切换到非免费模型并重试
-     */
-    if (!apiResponse.ok) {
-        const errorBody = await apiResponse.text();
-        console.log(`OpenRouter API error with model ${currentModel}:`, errorBody);
+    // 检查是否需要切换模型（免费额度用尽）
+    if (!result.ok) {
+        console.log(`Free model request failed:`, result.responseData);
         
-        // 判断是否为免费额度用尽的情况
-        // 基于OpenRouter常见错误信息特征: 包含quota(配额)和exhausted(用尽)/insufficient(不足)关键词
-        // 同时确保当前使用的是免费模型
-        const isFreeQuotaExhausted = errorBody.includes("quota") && 
-                                    (errorBody.includes("exhausted") || errorBody.includes("insufficient")) &&
-                                    currentModel.includes(":free");
+        // 更精确的免费额度用尽判断条件
+        const errorMessage = typeof result.responseData.error === 'string' 
+            ? result.responseData.error 
+            : JSON.stringify(result.responseData.error || '');
+            
+        // 增强的错误判断逻辑，覆盖更多可能的错误信息
+        const isFreeQuotaExhausted = [
+            'quota exhausted',
+            'insufficient quota',
+            'free quota',
+            'rate limit',
+            'daily limit'
+        ].some(phrase => errorMessage.toLowerCase().includes(phrase)) &&
+          result.currentModel === MODELS.free;
         
         if (isFreeQuotaExhausted) {
-            console.log("免费额度已用尽，尝试切换到非免费模型...");
-            // 切换到非免费版本模型（移除:free后缀）
-            const newModel = "google/gemini-2.5-flash-image-preview";
-            // 使用新模型重新发起请求
-            const retryResult = await makeRequest(newModel);
-            apiResponse = retryResult.apiResponse;
-            currentModel = newModel;
+            console.log("免费额度已用尽或达到限制，切换到非免费模型重试...");
+            // 明确使用非免费模型重试
+            result = await makeRequest(MODELS.paid);
         }
     }
     
-    // 检查最终请求是否成功，若仍失败则抛出详细错误
-    if (!apiResponse.ok) {
-        const errorBody = await apiResponse.text();
-        throw new Error(`OpenRouter API error with model ${currentModel}: ${errorBody}`);
+    // 检查最终请求是否成功
+    if (!result.ok) {
+        const errorDetails = result.responseData.error || 'Unknown error';
+        throw new Error(`OpenRouter API error with model ${result.currentModel}: ${errorDetails}`);
     }
     
-    // 解析API返回的JSON数据
-    const responseData = await apiResponse.json();
-    console.log(`OpenRouter Response with model ${currentModel}:`, JSON.stringify(responseData, null, 2));
+    console.log(`OpenRouter Response with model ${result.currentModel}:`, 
+              JSON.stringify(result.responseData, null, 2));
     
     // 提取响应中的消息内容
-    const message = responseData.choices?.[0]?.message;
+    const message = result.responseData.choices?.[0]?.message;
     
     // 处理图片类型响应
     if (message?.images?.[0]?.image_url?.url) { 
