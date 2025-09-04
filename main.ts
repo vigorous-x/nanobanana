@@ -7,25 +7,76 @@ function createJsonErrorResponse(message: string, statusCode = 500) { /* ... */ 
 
 // --- 核心业务逻辑：调用 OpenRouter ---
 async function callOpenRouter(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
-    if (!apiKey) { throw new Error("callOpenRouter received an empty apiKey."); }
-    const openrouterPayload = { model: "google/gemini-2.5-flash-image-preview:free", messages };
-    console.log("Sending SMARTLY EXTRACTED payload to OpenRouter:", JSON.stringify(openrouterPayload, null, 2));
-    const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify(openrouterPayload)
-    });
+    if (!apiKey) { 
+        throw new Error("callOpenRouter received an empty apiKey."); 
+    }
+    
+    // 定义模型，先尝试免费版
+    let model = "google/gemini-2.5-flash-image-preview:free";
+    
+    // 封装请求逻辑，便于重试
+    const makeRequest = async (currentModel: string) => {
+        const openrouterPayload = { model: currentModel, messages };
+        console.log(`Sending payload to OpenRouter with model ${currentModel}:`, JSON.stringify(openrouterPayload, null, 2));
+        
+        const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST", 
+            headers: { 
+                "Authorization": `Bearer ${apiKey}`, 
+                "Content-Type": "application/json" 
+            },
+            body: JSON.stringify(openrouterPayload)
+        });
+        
+        return { apiResponse, currentModel };
+    };
+    
+    // 首次请求
+    let { apiResponse, currentModel } = await makeRequest(model);
+    
+    // 检查是否需要切换模型（免费额度用尽）
     if (!apiResponse.ok) {
         const errorBody = await apiResponse.text();
-        throw new Error(`OpenRouter API error: Unauthorized - ${errorBody}`);
+        console.log(`OpenRouter API error with model ${currentModel}:`, errorBody);
+        
+        // 判断是否是免费额度用尽的情况（根据OpenRouter的错误信息特征）
+        const isFreeQuotaExhausted = errorBody.includes("quota") && 
+                                    (errorBody.includes("exhausted") || errorBody.includes("insufficient")) &&
+                                    currentModel.includes(":free");
+        
+        if (isFreeQuotaExhausted) {
+            console.log("免费额度已用尽，尝试切换到非免费模型...");
+            // 切换到非免费版本模型
+            const newModel = "google/gemini-2.5-flash-image-preview";
+            // 用新模型重试请求
+            const retryResult = await makeRequest(newModel);
+            apiResponse = retryResult.apiResponse;
+            currentModel = newModel;
+        }
     }
+    
+    // 检查最终响应是否成功
+    if (!apiResponse.ok) {
+        const errorBody = await apiResponse.text();
+        throw new Error(`OpenRouter API error with model ${currentModel}: ${errorBody}`);
+    }
+    
     const responseData = await apiResponse.json();
-    console.log("OpenRouter Response:", JSON.stringify(responseData, null, 2));
+    console.log(`OpenRouter Response with model ${currentModel}:`, JSON.stringify(responseData, null, 2));
+    
     const message = responseData.choices?.[0]?.message;
-    if (message?.images?.[0]?.image_url?.url) { return { type: 'image', content: message.images[0].image_url.url }; }
-    if (typeof message?.content === 'string' && message.content.startsWith('data:image/')) { return { type: 'image', content: message.content }; }
-    if (typeof message?.content === 'string' && message.content.trim() !== '') { return { type: 'text', content: message.content }; }
+    if (message?.images?.[0]?.image_url?.url) { 
+        return { type: 'image', content: message.images[0].image_url.url }; 
+    }
+    if (typeof message?.content === 'string' && message.content.startsWith('data:image/')) { 
+        return { type: 'image', content: message.content }; 
+    }
+    if (typeof message?.content === 'string' && message.content.trim() !== '') { 
+        return { type: 'text', content: message.content }; 
+    }
     return { type: 'text', content: "[模型没有返回有效内容]" };
 }
+
 
 // --- 主服务逻辑 ---
 serve(async (req) => {
