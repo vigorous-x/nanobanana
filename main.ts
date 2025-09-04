@@ -5,127 +5,32 @@ import { Buffer } from "https://deno.land/std@0.177.0/node/buffer.ts";
 // --- 辅助函数：生成错误 JSON 响应 ---
 function createJsonErrorResponse(message: string, statusCode = 500) { /* ... */ }
 
-// --- 核心业务逻辑：调用 OpenRouter ---
-async function callOpenRouter(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
-    // 验证API密钥是否存在
-    if (!apiKey) { 
-        throw new Error("callOpenRouter received an empty apiKey."); 
+// --- 核心业务逻辑：调用 Gemini 原生接口 ---
+async function callGemini(messages: any[], apiKey: string): Promise<{ type: 'image' | 'text'; content: string }> {
+    if (!apiKey) { throw new Error("callGemini received an empty apiKey."); }
+    const geminiPayload = { contents: messages };
+    console.log("Sending payload to Gemini API:", JSON.stringify(geminiPayload, null, 2));
+    const apiResponse = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent", {
+        method: "POST",
+        headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify(geminiPayload)
+    });
+    if (!apiResponse.ok) {
+        const errorBody = await apiResponse.text();
+        throw new Error(`Gemini API error: Unauthorized - ${errorBody}`);
     }
-    
-    // 定义模型列表，优先使用免费模型
-    const MODELS = {
-        free: "google/gemini-2.5-flash-image-preview:free",
-        paid: "google/gemini-2.5-flash-image-preview"
-    };
-    
-    /**
-     * 封装请求逻辑，便于在模型切换时复用
-     * @param currentModel 当前要使用的模型名称
-     * @returns 包含响应对象、响应数据和当前使用模型的结果
-     */
-    const makeRequest = async (currentModel: string) => {
-        try {
-            // 构建请求 payload，包含模型和消息列表
-            const openrouterPayload = { model: currentModel, messages };
-            console.log(`Sending payload to OpenRouter with model ${currentModel}:`, 
-                      JSON.stringify(openrouterPayload, null, 2));
-            
-            // 发送POST请求到OpenRouter API
-            const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                method: "POST", 
-                headers: { 
-                    "Authorization": `Bearer ${apiKey}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(openrouterPayload)
-            });
-
-            // 解析响应内容（无论成功与否都尝试解析）
-            let responseData;
-            try {
-                responseData = await apiResponse.json();
-            } catch (e) {
-                responseData = { error: await apiResponse.text() };
-            }
-
-            return { 
-                apiResponse, 
-                responseData, 
-                currentModel,
-                ok: apiResponse.ok
-            };
-        } catch (error) {
-            console.error(`Request failed with model ${currentModel}:`, error);
-            return { 
-                apiResponse: null, 
-                responseData: { error: error.message }, 
-                currentModel,
-                ok: false
-            };
-        }
-    };
-    
-    // 先尝试免费模型
-    let result = await makeRequest(MODELS.free);
-    
-    // 检查是否需要切换模型（免费额度用尽）
-    if (!result.ok) {
-        console.log(`Free model request failed:`, result.responseData);
-        
-        // 更精确的免费额度用尽判断条件
-        const errorMessage = typeof result.responseData.error === 'string' 
-            ? result.responseData.error 
-            : JSON.stringify(result.responseData.error || '');
-            
-        // 增强的错误判断逻辑，覆盖更多可能的错误信息
-        const isFreeQuotaExhausted = [
-            'quota exhausted',
-            'insufficient quota',
-            'free quota',
-            'rate limit',
-            'daily limit'
-        ].some(phrase => errorMessage.toLowerCase().includes(phrase)) &&
-          result.currentModel === MODELS.free;
-        
-        if (isFreeQuotaExhausted) {
-            console.log("免费额度已用尽或达到限制，切换到非免费模型重试...");
-            // 明确使用非免费模型重试
-            result = await makeRequest(MODELS.paid);
-        }
+    const responseData = await apiResponse.json();
+    console.log("Gemini Response:", JSON.stringify(responseData, null, 2));
+    const candidate = responseData.candidates?.[0]?.content;
+    if (candidate?.parts?.[0]?.inlineData) {
+        const { mimeType, data } = candidate.parts[0].inlineData;
+        return { type: 'image', content: `data:${mimeType};base64,${data}` };
     }
-    
-    // 检查最终请求是否成功
-    if (!result.ok) {
-        const errorDetails = result.responseData.error || 'Unknown error';
-        throw new Error(`OpenRouter API error with model ${result.currentModel}: ${errorDetails}`);
+    if (candidate?.parts?.[0]?.text) {
+        return { type: 'text', content: candidate.parts[0].text };
     }
-    
-    console.log(`OpenRouter Response with model ${result.currentModel}:`, 
-              JSON.stringify(result.responseData, null, 2));
-    
-    // 提取响应中的消息内容
-    const message = result.responseData.choices?.[0]?.message;
-    
-    // 处理图片类型响应
-    if (message?.images?.[0]?.image_url?.url) { 
-        return { type: 'image', content: message.images[0].image_url.url }; 
-    }
-    
-    // 处理base64编码的图片内容
-    if (typeof message?.content === 'string' && message.content.startsWith('data:image/')) { 
-        return { type: 'image', content: message.content }; 
-    }
-    
-    // 处理文本类型响应
-    if (typeof message?.content === 'string' && message.content.trim() !== '') { 
-        return { type: 'text', content: message.content }; 
-    }
-    
-    // 处理模型未返回有效内容的情况
     return { type: 'text', content: "[模型没有返回有效内容]" };
 }
-    
-
 
 // --- 主服务逻辑 ---
 serve(async (req) => {
@@ -148,26 +53,24 @@ serve(async (req) => {
             if (relevantHistory.length === 0 && lastUserMessageIndex !== -1) relevantHistory = [fullHistory[lastUserMessageIndex]];
             if (relevantHistory.length === 0) return createJsonErrorResponse("No user message found.", 400);
 
-            const openrouterMessages = relevantHistory.map((geminiMsg: any) => {
-                const parts = geminiMsg.parts.map((p: any) => p.text ? {type: "text", text: p.text} : {type: "image_url", image_url: {url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`}});
-                return { role: geminiMsg.role === 'model' ? 'assistant' : 'user', content: parts };
-            });
+            // Gemini 原生接口直接用 contents
+            const geminiMessages = relevantHistory;
             
             // --- 简化后的流处理 ---
             const stream = new ReadableStream({
                 async start(controller) {
                     try {
-                        const openRouterResult = await callOpenRouter(openrouterMessages, apiKey);
+                        const geminiResult = await callGemini(geminiMessages, apiKey);
                         const sendChunk = (data: object) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
                         
-                        let textToStream = (openRouterResult.type === 'image') ? "好的，图片已生成：" : openRouterResult.content;
+                        let textToStream = (geminiResult.type === 'image') ? "好的，图片已生成：" : geminiResult.content;
                         for (const char of textToStream) {
                             sendChunk({ candidates: [{ content: { role: "model", parts: [{ text: char }] } }] });
                             await new Promise(r => setTimeout(r, 2));
                         }
                         
-                        if (openRouterResult.type === 'image') {
-                            const matches = openRouterResult.content.match(/^data:(.+);base64,(.*)$/);
+                        if (geminiResult.type === 'image') {
+                            const matches = geminiResult.content.match(/^data:(.+);base64,(.*)$/);
                             if (matches) {
                                 sendChunk({ candidates: [{ content: { role: "model", parts: [{ inlineData: { mimeType: matches[1], data: matches[2] } }] } }] });
                             }
@@ -204,16 +107,13 @@ serve(async (req) => {
             if (relevantHistory.length === 0 && lastUserMessageIndex !== -1) relevantHistory = [fullHistory[lastUserMessageIndex]];
             if (relevantHistory.length === 0) return createJsonErrorResponse("No user message found.", 400);
 
-            const openrouterMessages = relevantHistory.map((geminiMsg: any) => {
-                const parts = geminiMsg.parts.map((p: any) => p.text ? {type: "text", text: p.text} : {type: "image_url", image_url: {url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`}});
-                return { role: geminiMsg.role === 'model' ? 'assistant' : 'user', content: parts };
-            });
+            const geminiMessages = relevantHistory;
             
-            const openRouterResult = await callOpenRouter(openrouterMessages, apiKey);
+            const geminiResult = await callGemini(geminiMessages, apiKey);
 
-            const finalParts = [];
-            if (openRouterResult.type === 'image') {
-                const matches = openRouterResult.content.match(/^data:(.+);base64,(.*)$/);
+            const finalParts: any[] = [];
+            if (geminiResult.type === 'image') {
+                const matches = geminiResult.content.match(/^data:(.+);base64,(.*)$/);
                 if (matches) {
                     finalParts.push({ text: "好的，图片已生成：" });
                     finalParts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
@@ -221,7 +121,7 @@ serve(async (req) => {
                     finalParts.push({ text: "[图片生成失败]" });
                 }
             } else {
-                finalParts.push({ text: openRouterResult.content });
+                finalParts.push({ text: geminiResult.content });
             }
             const responsePayload = { candidates: [{ content: { role: "model", parts: finalParts }, finishReason: "STOP", index: 0 }], usageMetadata: { promptTokenCount: 264, totalTokenCount: 1578 } };
             return new Response(JSON.stringify(responsePayload), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
@@ -234,14 +134,14 @@ serve(async (req) => {
     if (pathname === "/generate") {
         try {
             const { prompt, images, apikey } = await req.json();
-            const openrouterApiKey = apikey || Deno.env.get("OPENROUTER_API_KEY");
-            if (!openrouterApiKey) { return new Response(JSON.stringify({ error: "OpenRouter API key is not set." }), { status: 500 }); }
+            const geminiApiKey = apikey; // 不再尝试读取 Deno.env
+            if (!geminiApiKey) { return new Response(JSON.stringify({ error: "Gemini API key is not set." }), { status: 500 }); }
             if (!prompt || !images || !images.length) { return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400 }); }
             
-            const webUiMessages = [ { role: "user", content: [ {type: "text", text: prompt}, ...images.map(img => ({type: "image_url", image_url: {url: img}})) ] } ];
+            const webUiMessages = [ { role: "user", parts: [ { text: prompt }, ...images.map(img => ({ inlineData: { mimeType: img.split(';')[0].replace('data:', ''), data: img.split(',')[1] } })) ] } ];
             
             // --- 这里是修改的关键 ---
-            const result = await callOpenRouter(webUiMessages, openrouterApiKey);
+            const result = await callGemini(webUiMessages, geminiApiKey);
     
             // 检查返回的是否是图片类型，并提取 content
             if (result && result.type === 'image') {
