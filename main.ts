@@ -1,6 +1,6 @@
-import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
-import { serveDir } from "https://deno.land/std@0.200.0/http/file_server.ts";
-import { Buffer } from "https://deno.land/std@0.177.0/node/buffer.ts";
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+import { serveDir } from "https://deno.land/std@0.224.0/http/file_server.ts";
+import { Buffer } from "https://deno.land/std@0.224.0/node/buffer.ts";
 
 // --- 辅助函数：生成错误 JSON 响应 ---
 function createJsonErrorResponse(message: string, statusCode = 500) { /* ... */ }
